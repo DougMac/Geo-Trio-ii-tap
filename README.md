@@ -1,5 +1,7 @@
 # Geo Trio II serial tap: local smart meter data for Home Assistant
 
+> **About this fork.** This is a fork of [gaza1994/Geo-Trio-ii-tap](https://github.com/gaza1994/Geo-Trio-ii-tap). The hardware and protocol write-up below is the original author's. The firmware here has been extended and tested on a SMETS2 install: export meter, gas power from the meter's half-hour samples, weekly figures, bill to date, billing period, running cost totals for the Energy dashboard, supply/meter status, supplier name and messages, Zigbee link quality, stale-data alarms for electricity and gas, a meter scaling check, a future-tariff guard, encrypted OTA, and several decoder fixes. See [CHANGELOG.md](CHANGELOG.md) for the full list, and [dashboard/](dashboard/) for an example Home Assistant dashboard.
+
 Live electricity, gas, costs and the **tariff itself**, read straight from a Geo Trio II in-home display by an ESP32-C3 hidden in its battery bay. No cloud, no account, no API keys. It keeps working when the internet doesn't.
 
 ![Finished: the C3 lives under the battery cover](images/finished.jpg)

@@ -1,0 +1,449 @@
+title: Trio Tap
+# shared look for the small cost tiles (button-card template)
+button_card_templates:
+  trio_tile:
+    show_icon: false
+    show_state: false
+    tap_action: { action: more-info }
+    styles:
+      card: [padding: 10px 14px]
+      grid:
+        - grid-template-areas: '"n" "v" "s"'
+        - grid-template-columns: 1fr
+        - grid-template-rows: auto auto auto
+      name: [justify-self: start, font-size: 13px, opacity: 0.8]
+      custom_fields:
+        v: [justify-self: start, font-size: 22px, font-weight: 600, padding: 2px 0]
+        s: [justify-self: start, font-size: 12px, opacity: 0.6]
+views:
+  - title: Energy now
+    path: trio
+    icon: mdi:meter-electric
+    type: sections
+    max_columns: 4            # desktop: 4 columns wide; phones/tablets stack automatically
+    sections:
+      # ---- Row 1: Now (2 columns) + Today chart (2 columns) ---------------------
+      # (a 2-column section has a 24-unit grid, so columns: 12 = half its width)
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Now
+          # Electricity dial, Trio-style: about 6 kW full scale (Trio needle ~33 W per degree), a short
+          # dark-blue export stub, then green / orange / red. Two copies, one shown at a time, so the
+          # caption can say "being imported now" or "being exported now" like the Trio.
+          - type: conditional
+            conditions:
+              - condition: or
+                conditions:
+                  - { condition: numeric_state, entity: sensor.geo_trio_tap_electricity_power, above: -1 }
+                  - { condition: state, entity: sensor.geo_trio_tap_electricity_power, state: unknown }
+                  - { condition: state, entity: sensor.geo_trio_tap_electricity_power, state: unavailable }
+            card:
+              type: gauge
+              entity: sensor.geo_trio_tap_electricity_power
+              name: being imported now
+              unit: W
+              min: -600
+              max: 6000
+              needle: true
+              segments:
+                - { from: -600, color: "#1e40af" }   # exporting
+                - { from: 0, color: "#3fb37f" }
+                - { from: 1500, color: "#f4996a" }   # where the Trio's dial turns orange (photo: needle on the line at 1.49 kW)
+                - { from: 3100, color: "#e5675c" }   # meter's medium/high threshold (elec 0x0708 attr 0x0401); check vs Trio
+            grid_options: { columns: 12 }
+          - type: conditional
+            conditions:
+              - { condition: numeric_state, entity: sensor.geo_trio_tap_electricity_power, below: 0 }
+            card:
+              type: gauge
+              entity: sensor.geo_trio_tap_electricity_power
+              name: being exported now
+              unit: W
+              min: -600
+              max: 6000
+              needle: true
+              segments:
+                - { from: -600, color: "#1e40af" }
+                - { from: 0, color: "#3fb37f" }
+                - { from: 1500, color: "#f4996a" }
+                - { from: 3100, color: "#e5675c" }
+            grid_options: { columns: 12 }
+          # Gas power = the meter's last half-hour sample, which the Trio asks for every 30 min.
+          # It's unknown after a tap restart until the next sample (up to 30 min), or if none for 65 min.
+          # Trio-style flame (needs button-card): a blue outline, with a solid flame inside that grows
+          # with the power, anchored at the bottom. Empty outline at 0 W; dashed grey while waiting.
+          - type: custom:button-card
+            entity: sensor.geo_trio_tap_gas_power
+            name: Gas
+            show_icon: false
+            show_state: false
+            tap_action: { action: more-info }
+            variables:
+              full_kw: 25          # power at which the inner flame fills the outline
+            custom_fields:
+              flame: |
+                [[[
+                  const w = parseFloat(entity ? entity.state : NaN);
+                  const ok = !isNaN(w);
+                  // outline: a flame-drop whose tip hooks over to the left, like the Trio's (y 4..130)
+                  const shape = "M33 4 C52 20 86 50 86 90 A36 40 0 0 1 14 90 C14 64 34 50 40 32 C43 22 40 12 33 4 Z";
+                  // inner flame: the mdi:fire icon (24x24 grid, bottom centre at 12,21), with its dark cut-out
+                  const fire = "M17.66 11.2C17.43 10.9 17.15 10.64 16.89 10.38C16.22 9.78 15.46 9.35 14.82 8.72C13.33 7.26 13 4.85 13.95 3C13 3.23 12.17 3.75 11.46 4.32C8.87 6.4 7.85 10.07 9.07 13.22C9.11 13.32 9.15 13.42 9.15 13.55C9.15 13.77 9 13.97 8.8 14.05C8.57 14.15 8.33 14.09 8.14 13.93C8.08 13.88 8.04 13.83 8 13.76C6.87 12.33 6.69 10.28 7.45 8.64C5.78 10 4.87 12.3 5 14.47C5.06 14.97 5.12 15.47 5.29 15.97C5.43 16.57 5.7 17.17 6 17.7C7.08 19.43 8.95 20.67 10.96 20.92C13.1 21.19 15.39 20.8 17.03 19.32C18.86 17.66 19.5 15 18.56 12.72L18.43 12.46C18.22 12 17.66 11.2 17.66 11.2M14.5 17.5C14.22 17.74 13.76 18 13.4 18.1C12.28 18.5 11.16 17.94 10.5 17.28C11.69 17 12.4 16.12 12.61 15.23C12.78 14.43 12.46 13.77 12.33 13C12.21 12.26 12.23 11.63 12.5 10.94C12.69 11.32 12.89 11.7 13.13 12C13.9 13 15.11 13.44 15.37 14.8C15.41 14.94 15.43 15.08 15.43 15.23C15.46 16.05 15.1 16.95 14.5 17.5H14.5Z";
+                  let inner = "";
+                  if (ok && w > 0) {
+                    // share of the outline's height: 0.2 at low power up to 0.6 at full_kw (wider would cross the outline)
+                    const h = 0.20 + 0.40 * Math.min(w / (variables.full_kw * 1000), 1);
+                    const k = h * 124 / 18;                                                  // the icon is 18 units tall
+                    inner = `<g transform="translate(50 124) scale(${k}) translate(-12 -21)"><path d="${fire}" fill="#3b9df6"/></g>`;
+                  }
+                  const stroke = ok ? "#3b82f6" : "var(--disabled-text-color, #9ca3af)";
+                  const dash = ok ? "" : 'stroke-dasharray="6 5"';
+                  return `<svg viewBox="0 0 100 140" style="height:100%;width:auto;overflow:visible">
+                            <path d="${shape}" fill="none" stroke="${stroke}" stroke-width="3" ${dash}/>${inner}</svg>`;
+                ]]]
+              value: |
+                [[[
+                  const w = parseFloat(entity ? entity.state : NaN);
+                  if (isNaN(w))
+                    return `<span style="font-size:13px;opacity:.7">waiting for the next half-hour reading</span>`;
+                  const v = w >= 1000 ? (w / 1000).toFixed(2) + " kW" : Math.round(w) + " W";
+                  return `<b style="font-size:20px">${v}</b><br><span style="font-size:12px;opacity:.7">30 minute average</span>`;
+                ]]]
+            styles:
+              card: [padding: 12px 8px]
+              grid:
+                - grid-template-areas: '"flame" "value" "n"'
+                - grid-template-rows: 1fr auto auto
+              name: [font-size: 15px, padding-top: 4px]
+              custom_fields:
+                flame: [height: 110px, display: flex, justify-content: center]
+                value: [line-height: 1.3, text-align: center]
+            grid_options: { columns: 12 }
+          # Cost tiles (fill the space beside the taller Today chart). "Now" = running cost per hour
+          # at the current power, without standing charges, like the Trio's £/hr view.
+          - type: custom:button-card
+            template: trio_tile
+            entity: sensor.geo_trio_tap_electricity_power
+            name: Electricity now
+            triggers_update: [sensor.geo_trio_tap_electricity_unit_rate]
+            custom_fields:
+              v: |
+                [[[
+                  const w = Math.max(parseFloat(entity.state) || 0, 0);
+                  const r = parseFloat((states['sensor.geo_trio_tap_electricity_unit_rate'] || {}).state) || 0;
+                  return '£' + (w / 1000 * r).toFixed(2) + '/hr';
+                ]]]
+              s: |
+                [[[
+                  const r = parseFloat((states['sensor.geo_trio_tap_electricity_unit_rate'] || {}).state) || 0;
+                  return 'at ' + (r * 100).toFixed(2) + 'p/kWh';
+                ]]]
+            grid_options: { columns: 12 }
+          - type: custom:button-card
+            template: trio_tile
+            entity: sensor.geo_trio_tap_gas_power
+            name: Gas now
+            triggers_update: [sensor.geo_trio_tap_gas_unit_rate]
+            custom_fields:
+              v: |
+                [[[
+                  const w = parseFloat(entity.state);
+                  if (isNaN(w)) return '–';
+                  const r = parseFloat((states['sensor.geo_trio_tap_gas_unit_rate'] || {}).state) || 0;
+                  return '£' + (w / 1000 * r).toFixed(2) + '/hr';
+                ]]]
+              s: |
+                [[[
+                  const r = parseFloat((states['sensor.geo_trio_tap_gas_unit_rate'] || {}).state) || 0;
+                  return 'at ' + (r * 100).toFixed(2) + 'p/kWh · 30 min average';
+                ]]]
+            grid_options: { columns: 12 }
+          # Divider: the tiles below are elec + gas combined
+          - type: heading
+            heading: Totals
+            heading_style: subtitle
+          - type: custom:button-card
+            template: trio_tile
+            entity: sensor.geo_trio_tap_electricity_cost_today
+            name: Today so far (total)
+            triggers_update: [sensor.geo_trio_tap_gas_cost_today]
+            custom_fields:
+              v: |
+                [[[
+                  const e = parseFloat(entity.state) || 0;
+                  const g = parseFloat((states['sensor.geo_trio_tap_gas_cost_today'] || {}).state) || 0;
+                  return '£' + (e + g).toFixed(2);
+                ]]]
+              s: |
+                [[[
+                  const e = parseFloat(entity.state) || 0;
+                  const g = parseFloat((states['sensor.geo_trio_tap_gas_cost_today'] || {}).state) || 0;
+                  return 'elec £' + e.toFixed(2) + ' · gas £' + g.toFixed(2);
+                ]]]
+            grid_options: { columns: 12 }
+          - type: custom:button-card
+            template: trio_tile
+            entity: sensor.geo_trio_tap_bill_to_date_total   # HA template helper (elec + gas)
+            name: Bill to date (total)
+            triggers_update: [sensor.geo_trio_tap_billing_period, sensor.geo_trio_tap_electricity_bill_to_date, sensor.geo_trio_tap_gas_bill_to_date]
+            custom_fields:
+              v: |
+                [[[
+                  const t = parseFloat(entity.state);
+                  return isNaN(t) ? '–' : '£' + t.toFixed(2);
+                ]]]
+              s: |
+                [[[
+                  const f = (id) => { const x = parseFloat((states[id] || {}).state); return isNaN(x) ? '–' : '£' + x.toFixed(2); };
+                  const p = (states['sensor.geo_trio_tap_billing_period'] || {}).state || '';
+                  return 'elec ' + f('sensor.geo_trio_tap_electricity_bill_to_date') + ' · gas ' + f('sensor.geo_trio_tap_gas_bill_to_date') + (p ? ' (' + p + ')' : '');
+                ]]]
+            grid_options: { columns: 12 }
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Today
+          - type: custom:apexcharts-card
+            header: { show: true, show_states: true, colorize_states: true }
+            graph_span: 24h
+            span: { start: day }
+            show: { loading: false }   # no spinner while it refreshes
+            update_interval: 1min      # redraw once a minute, not on every 10 s power update
+            now: { show: true, label: "" }   # dotted line at the current time, no label
+            apex_config:
+              chart: { height: 330 }
+            yaxis:
+              - id: elec
+                min: 0
+                decimals: 0
+                apex_config: { title: { text: "Electricity W" } }
+              - id: gas
+                opposite: true
+                min: 0
+                decimals: 0
+                apex_config: { title: { text: "Gas W" } }
+            series:
+              - entity: sensor.geo_trio_tap_electricity_power
+                name: Electricity
+                yaxis_id: elec
+                color: "#488fc2"   # HA Energy dashboard electricity
+                stroke_width: 1
+                extend_to: now
+                transform: "return x < 0 ? 0 : x;"   # ignore export: show it as 0 W
+                group_by: { func: avg, duration: 2min }
+              - entity: sensor.geo_trio_tap_gas_power
+                name: Gas
+                yaxis_id: gas
+                color: "#8e021b"   # HA Energy dashboard gas
+                curve: stepline
+                stroke_width: 2
+                extend_to: now
+            grid_options: { columns: full }
+
+      # ---- Row 2: daily usage (2 columns) + monthly cost (2 columns) -----------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Daily usage, last 14 days
+          - type: custom:apexcharts-card
+            graph_span: 14d
+            span: { end: day }
+            show: { loading: false }
+            update_interval: 10min
+            apex_config: { chart: { height: 280 } }
+            yaxis:
+              - id: elec
+                min: 0
+                decimals: 1
+                apex_config: { title: { text: "Electricity kWh" } }
+              - id: gas
+                opposite: true
+                min: 0
+                decimals: 0
+                apex_config: { title: { text: "Gas kWh" } }
+            series:
+              - entity: sensor.geo_trio_tap_electricity_meter
+                name: Electricity
+                yaxis_id: elec
+                type: column
+                color: "#488fc2"   # HA Energy dashboard electricity
+                statistics: { type: change, period: day, align: start }
+              - entity: sensor.geo_trio_tap_gas_meter_kwh
+                name: Gas
+                yaxis_id: gas
+                type: column
+                color: "#8e021b"   # HA Energy dashboard gas
+                statistics: { type: change, period: day, align: start }
+            grid_options: { columns: full }
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Monthly cost, last 12 months (£, incl. standing)
+          - type: custom:apexcharts-card
+            graph_span: 12month
+            span: { end: month }
+            show: { loading: false }
+            update_interval: 10min
+            apex_config: { chart: { stacked: true, height: 280 } }
+            yaxis:
+              - min: 0
+                decimals: 0
+            series:
+              - entity: sensor.geo_trio_tap_electricity_cost_running_total
+                name: Electricity
+                type: column
+                color: "#488fc2"   # HA Energy dashboard electricity
+                statistics: { type: change, period: month, align: start }
+              - entity: sensor.geo_trio_tap_gas_cost_running_total
+                name: Gas
+                type: column
+                color: "#8e021b"   # HA Energy dashboard gas
+                statistics: { type: change, period: month, align: start }
+            grid_options: { columns: full }
+
+      # ---- Row 3: electricity, gas, tariff, status (entity lists) ------------------
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Electricity
+          - type: entities
+            entities:
+              - type: section
+                label: Usage
+              - { entity: sensor.geo_trio_tap_electricity_today, name: Today }
+              - { entity: sensor.geo_trio_tap_electricity_yesterday, name: Yesterday }
+              - { entity: sensor.geo_trio_tap_electricity_this_week, name: This week }
+              - { entity: sensor.geo_trio_tap_electricity_this_month, name: This month }
+              - type: section
+                label: Cost (incl. standing charge)
+              - { entity: sensor.geo_trio_tap_electricity_cost_today, name: Today }
+              - { entity: sensor.geo_trio_tap_electricity_cost_yesterday, name: Yesterday }
+              - { entity: sensor.geo_trio_tap_electricity_cost_this_week, name: This week }
+              - { entity: sensor.geo_trio_tap_electricity_cost_this_month, name: This month }
+              - type: divider
+              - { entity: sensor.geo_trio_tap_electricity_bill_to_date, name: Bill to date }            
+            grid_options: { columns: full }
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Gas
+          - type: entities
+            entities:
+              - type: section
+                label: Usage
+              - { entity: sensor.geo_trio_tap_gas_today, name: Today, icon: mdi:fire }
+              - { entity: sensor.geo_trio_tap_gas_yesterday, name: Yesterday, icon: mdi:fire }
+              - { entity: sensor.geo_trio_tap_gas_this_week, name: This week, icon: mdi:fire }
+              - { entity: sensor.geo_trio_tap_gas_this_month, name: This month, icon: mdi:fire }
+              - type: section
+                label: Cost (incl. standing charge)
+              - { entity: sensor.geo_trio_tap_gas_cost_today, name: Today }
+              - { entity: sensor.geo_trio_tap_gas_cost_yesterday, name: Yesterday }
+              - { entity: sensor.geo_trio_tap_gas_cost_this_week, name: This week }
+              - { entity: sensor.geo_trio_tap_gas_cost_this_month, name: This month }
+              - type: divider
+              - { entity: sensor.geo_trio_tap_gas_bill_to_date, name: Bill to date }
+            grid_options: { columns: full }
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Tariff
+          - type: entities
+            entities:
+              - type: section
+                label: Electricity
+              - { entity: sensor.geo_trio_tap_electricity_unit_rate, name: Unit rate }
+              - { entity: sensor.geo_trio_tap_electricity_standing_charge, name: Standing charge }
+              - { entity: sensor.geo_trio_tap_electricity_average_unit_rate_today, name: Average today }
+              - { entity: sensor.geo_trio_tap_electricity_price_tier, name: Price tier }
+              - type: section
+                label: Gas
+              - { entity: sensor.geo_trio_tap_gas_unit_rate, name: Unit rate }
+              - { entity: sensor.geo_trio_tap_gas_standing_charge, name: Standing charge }
+              - { entity: sensor.geo_trio_tap_gas_calorific_value, name: Calorific value }
+              - { entity: sensor.geo_trio_tap_gas_volume_correction_factor, name: Volume correction }
+              - { entity: sensor.geo_trio_tap_gas_kwh_per_m3, name: kWh per m³ }
+              - type: divider
+              - { entity: sensor.geo_trio_tap_billing_period, name: Billing period, icon: mdi:calendar-range }
+              - { entity: sensor.geo_trio_tap_bill_to_date_total, name: Bill to date (total), icon: mdi:receipt-text }   # HA template helper
+              - { entity: sensor.geo_trio_tap_tariff_source, name: Source }
+              - { entity: sensor.geo_trio_tap_tariff_last_received, name: Last received }
+            grid_options: { columns: full }
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Status
+          - type: entities
+            state_color: true
+            entities:
+              - type: section
+                label: Meters
+              - { entity: binary_sensor.geo_trio_tap_electricity_data_stale, name: Electricity data }
+              - { entity: binary_sensor.geo_trio_tap_gas_data_stale, name: Gas data }
+              - { entity: sensor.geo_trio_tap_electricity_meter, name: Electricity meter, secondary_info: last-changed }
+              - { entity: sensor.geo_trio_tap_electricity_export_meter, name: Export meter, secondary_info: last-changed, icon: mdi:transmission-tower-export }
+              - { entity: sensor.geo_trio_tap_gas_meter_kwh, name: Gas meter (kWh), secondary_info: last-changed }
+              - { entity: sensor.geo_trio_tap_gas_meter, name: Gas meter, secondary_info: last-changed }
+              - { entity: binary_sensor.geo_trio_tap_electricity_supply, name: Electricity supply }
+              - { entity: binary_sensor.geo_trio_tap_gas_supply, name: Gas supply }
+              - { entity: sensor.geo_trio_tap_electricity_meter_status, name: Electricity meter status }
+              - { entity: sensor.geo_trio_tap_gas_meter_status, name: Gas meter status }
+              # Meter scaling: the sensor text starts "CHECK SCALING" if a meter's unit/multiplier/divisor/currency
+              # scaling differs from what the tap assumes (e.g. after a meter exchange). Shows OK, or red
+              # "Check scaling"; tap for the full text. Styled to look like the entity rows around it.
+              - type: custom:button-card
+                entity: sensor.geo_trio_tap_meter_scaling
+                name: Meter scaling
+                show_state: false
+                icon: "[[[ return entity.state.startsWith('CHECK') ? 'mdi:alert' : 'mdi:scale-balance'; ]]]"
+                custom_fields:
+                  st: |
+                    [[[
+                      if (entity.state.startsWith('CHECK')) return 'Check scaling';
+                      return (entity.state === 'unknown' || entity.state === 'unavailable') ? '–' : 'OK';
+                    ]]]
+                tap_action: { action: more-info }
+                styles:
+                  card: [background: none, box-shadow: none, border: none, padding: 0, height: 40px]
+                  grid:
+                    - grid-template-areas: '"i n st"'
+                    - grid-template-columns: 40px 1fr auto
+                    - grid-template-rows: 40px
+                    - align-items: center
+                  icon:
+                    - width: 24px
+                    - color: "[[[ return entity.state.startsWith('CHECK') ? 'var(--error-color)' : 'var(--state-icon-color)'; ]]]"
+                  name: [justify-self: start, padding-left: 16px, font-size: 14px]
+                  custom_fields:
+                    st:
+                      - justify-self: end
+                      - font-size: 14px
+                      - color: "[[[ return entity.state.startsWith('CHECK') ? 'var(--error-color)' : 'var(--primary-text-color)'; ]]]"
+              - type: section
+                label: ESP32
+              - { entity: sensor.geo_trio_tap_wifi_signal, name: WiFi signal }
+              - { entity: sensor.geo_trio_tap_uptime, name: Uptime }
+              - { entity: sensor.geo_trio_tap_board_temperature, name: Board temperature }
+              - { entity: sensor.geo_trio_tap_damaged_frames_rejected, name: Damaged frames }
+              - { entity: sensor.geo_trio_tap_new_message_kinds_seen, name: New message kinds }
+              - { entity: sensor.geo_trio_tap_frame_mismatch_count, name: Frame mismatches }
+              - type: section
+                label: Messages
+              - { entity: sensor.geo_trio_tap_supplier, name: Supplier }
+              - { entity: sensor.geo_trio_tap_supplier_message, name: Supplier message }
+              - { entity: sensor.geo_trio_tap_zigbee_chip_message, name: Zigbee chip }
+            grid_options: { columns: full }

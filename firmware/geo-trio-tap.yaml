@@ -1,6 +1,9 @@
-# Geo Trio II serial tap: ESPHome firmware for an ESP32-C3 SuperMini wired to the IHD's J8 test pad.
-# See ../README.md. Put trio_parser.h and trio_known.h in the same folder as this file.
-# The tariff defaults in `globals:` are the author's (Nov 2026); they are only used until the meter sends its own.
+# Geo Trio II serial tap
+# J8 (Zigbee chip TX) -> GPIO20. Receive only.
+# Changes from the original: uart debug "bytes" raised to 512 (default 150 could split
+# long frames), API encryption + encrypted OTA + fallback AP password on, WiFi TX power reduced for the
+# ESP32-C3 SuperMini, web server added.
+# Needs trio_parser.h and trio_known.h in the same folder as this file.
 
 esphome:
   name: geo-trio-tap
@@ -14,6 +17,13 @@ esphome:
       - lambda: |-
           id(new_msg_count).publish_state(id(g_new_count));
           id(bad_frames).publish_state(id(g_bad_count));
+          id(frame_mismatch_count).publish_state(0);
+          if (!id(g_supplier_msg).empty()) id(supplier_msg).publish_state(id(g_supplier_msg));
+          if (!id(g_supplier_name).empty()) id(supplier_name).publish_state(id(g_supplier_name));
+          if (!id(g_meter_scaling).empty()) id(meter_scaling).publish_state(id(g_meter_scaling));
+          // show the saved running cost totals straight away, not "unknown" until the next cost frame
+          if (id(g_e_cost_prev) >= 0) id(elec_cost_total).publish_state(id(g_e_cost_total));
+          if (id(g_g_cost_prev) >= 0) id(gas_cost_total).publish_state(id(g_g_cost_total));
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -29,57 +39,64 @@ logger:
 api:
   encryption:
     key: !secret geo_trio_api_key
+  reboot_timeout: 0s   # keep running through long HA outages (default reboots after 15 min without HA)
 
 ota:
   - platform: esphome
-    password: !secret geo_trio_ota_password
+    # OTA uploads are encrypted with the API key above (no separate key needed).
+    encryption:
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  output_power: 12dB    # reduced from the 20dB default to limit TX current spikes on the Trio's 5 V (common SuperMini fix); 8.5dB was too weak here (failed join after OTA), 12dB has run without brownouts
   ap:
     ssid: "Geo-Trio-Tap Fallback"
     password: !secret geo_trio_fallback_password
 
 captive_portal:
 
+# Local web page: http://geo-trio-tap.local (sensors, live logs). Login: admin / secret below.
+web_server:
+  port: 80
+  version: 3
+  ota: false        # no firmware upload via the web page (plaintext); installs use encrypted native OTA
+  auth:
+    type: digest      # only hashes go over the network (basic sends the password)
+    username: admin
+    password: !secret geo_trio_web_password
+
+# Two clock sources: HA, plus internet time (SNTP) so the clock is still set if the tap boots
+# while HA is down. Both set the same system clock, so id(ha_time).now() works with either.
 time:
   - platform: homeassistant
     id: ha_time
+    timezone: Europe/London
     on_time_sync:
       then:
-        - lambda: |-
-            // Restore yesterday's figures only if they were saved today (i.e. they really are yesterday's)
-            static bool done = false;
-            if (done) return;
-            done = true;
-            auto now = id(ha_time).now();
-            int today = now.year * 1000 + now.day_of_year;
-            if (id(g_y_day) != today) { ESP_LOGI("trio", "Stored yesterday values are stale, not restoring"); return; }
-            if (id(g_y_e_kwh)  >= 0 && std::isnan(id(elec_yesterday).state))      id(elec_yesterday).publish_state(id(g_y_e_kwh));
-            if (id(g_y_e_cost) >= 0 && std::isnan(id(elec_cost_yesterday).state)) id(elec_cost_yesterday).publish_state(id(g_y_e_cost));
-            if (id(g_y_g_kwh)  >= 0 && std::isnan(id(gas_yesterday).state))       id(gas_yesterday).publish_state(id(g_y_g_kwh));
-            if (id(g_y_g_cost) >= 0 && std::isnan(id(gas_cost_yesterday).state))  id(gas_cost_yesterday).publish_state(id(g_y_g_cost));
-            ESP_LOGI("trio", "Restored yesterday values from flash");
+        - script.execute: restore_yesterday
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/London
+    on_time_sync:
+      then:
+        - script.execute: restore_yesterday
 
 preferences:
   flash_write_interval: 5min   # tariff values only change rarely
 
 # ---------------------------------------------------------------------------------------
-# Tariff, remembered across restarts. Defaults = tariff on 5 Nov 2026, used only until
-# the meter publishes its own values.
+# Tariff, remembered across restarts. Defaults = an example UK bill (Nov 2026); replaced by
+# the meter's own values when the Trio sends its tariff (start-up / ~00:03).
 globals:
-  - { id: g_elec_rate,     type: float, restore_value: yes, initial_value: '0.26100' }
-  - { id: g_elec_standing, type: float, restore_value: yes, initial_value: '0.60310' }
-  - { id: g_gas_rate,      type: float, restore_value: yes, initial_value: '0.07871' }
-  - { id: g_gas_standing,  type: float, restore_value: yes, initial_value: '0.25499' }
+  - { id: g_elec_rate,     type: float, restore_value: yes, initial_value: '0.19270' }   # 19.27p/kWh
+  - { id: g_elec_standing, type: float, restore_value: yes, initial_value: '0.45090' }   # 45.09p/day
+  - { id: g_gas_rate,      type: float, restore_value: yes, initial_value: '0.05040' }   # 5.04p/kWh
+  - { id: g_gas_standing,  type: float, restore_value: yes, initial_value: '0.25030' }   # 25.03p/day
   - { id: g_gas_cf,        type: float, restore_value: yes, initial_value: '1.02264' }
-  - { id: g_gas_cv,        type: float, restore_value: yes, initial_value: '40.3' }
+  - { id: g_gas_cv,        type: float, restore_value: yes, initial_value: '39.6' }       # MJ/m³ from bill
   - { id: g_tariff_from_meter, type: bool, restore_value: yes, initial_value: 'false' }
   - { id: g_tariff_time,   type: uint32_t, restore_value: yes, initial_value: '0' }
-  # meter-reading sanity filters (not persisted)
-  - { id: g_last_elec_kwh, type: double, initial_value: '0' }
-  - { id: g_last_gas_m3,   type: double, initial_value: '0' }
   # gas kWh counted as it's used: each new m³ converted at the factor in force at that moment
   - { id: g_gas_kwh_total, type: double, restore_value: yes, initial_value: '0' }
   - { id: g_gas_kwh_base_m3, type: double, restore_value: yes, initial_value: '0' }
@@ -94,16 +111,48 @@ globals:
   - { id: g_bad_count,     type: int, initial_value: '0' }
   - { id: g_last_reading_ms, type: uint32_t, initial_value: '0' }
   # last "today" values seen, to derive "yesterday" when they reset at midnight
+  # (costs: "cost yesterday" comes from trio_cost_total, which sees every daily reset)
   - { id: g_prev_e_kwh,    type: double, initial_value: '-1' }
-  - { id: g_prev_e_cost,   type: double, initial_value: '-1' }
   - { id: g_prev_g_kwh,    type: double, initial_value: '-1' }
-  - { id: g_prev_g_cost,   type: double, initial_value: '-1' }
+  - { id: g_gas_sample_ms, type: uint32_t, initial_value: '0' }   # millis() of the last gas half-hour sample (gas power)
+  # "Gas data stale": end of the newest gas half-hour sample (UTC seconds since 2000; 0 = none yet)
+  - { id: g_gas_sample_end, type: uint32_t, initial_value: '0' }
+  # bill to date: raw value and decimal places, combined when both have arrived.
+  # The decimal places only come with the hourly tariff burst and never change, so they're kept in flash:
+  # after a tap restart the bill reappears with the first raw value instead of waiting for the next burst.
+  - { id: g_e_bill_raw,    type: double, initial_value: '-1' }
+  - { id: g_e_bill_digits, type: int,    restore_value: yes, initial_value: '-1' }
+  - { id: g_g_bill_raw,    type: double, initial_value: '-1' }
+  - { id: g_g_bill_digits, type: int,    restore_value: yes, initial_value: '-1' }
+  # last supplier message (Messaging cluster), kept across restarts: these arrive rarely
+  - id: g_supplier_msg
+    type: std::string
+    restore_value: yes
+    max_restore_data_length: 200
+  # supplier name from the meters (Device Management ProviderName), kept across restarts: sent at Trio start-up
+  - id: g_supplier_name
+    type: std::string
+    restore_value: yes
+    max_restore_data_length: 64
+  # "Meter scaling" text, kept across restarts: the scaling attributes only come in the Trio's start-up burst
+  - id: g_meter_scaling
+    type: std::string
+    restore_value: yes
+    max_restore_data_length: 254
   # yesterday's values, remembered across C3 restarts; only restored if saved today
   - { id: g_y_e_kwh,  type: float, restore_value: yes, initial_value: '-1' }
   - { id: g_y_e_cost, type: float, restore_value: yes, initial_value: '-1' }
   - { id: g_y_g_kwh,  type: float, restore_value: yes, initial_value: '-1' }
   - { id: g_y_g_cost, type: float, restore_value: yes, initial_value: '-1' }
   - { id: g_y_day,    type: int,   restore_value: yes, initial_value: '0' }
+  # running cost totals for the Energy dashboard (usage + standing charges, never decrease)
+  - { id: g_e_cost_total, type: double, restore_value: yes, initial_value: '0' }
+  - { id: g_e_cost_prev,  type: double, restore_value: yes, initial_value: '-1' }   # last "cost today" seen
+  - { id: g_e_reset_day,  type: int,    restore_value: yes, initial_value: '0' }    # day the meter's daily reset was last counted
+  - { id: g_g_cost_total, type: double, restore_value: yes, initial_value: '0' }
+  - { id: g_g_cost_prev,  type: double, restore_value: yes, initial_value: '-1' }
+  - { id: g_g_reset_day,  type: int,    restore_value: yes, initial_value: '0' }
+  - { id: g_capture_gen,  type: int,    initial_value: '0' }   # bumped each time "Capture message examples" is switched on
 
 uart:
   id: trio_uart
@@ -116,15 +165,19 @@ uart:
     after:
       delimiter: [0x03]
       timeout: 50ms
+      bytes: 512          # default is 150, which would split longer frames in two
     sequence:
       - lambda: |-
           static std::set<std::string> reported;
           TrioFrame f = trio_decode(bytes);
-          // IHD status/debug text: show it, and never count it as damaged (some fail the checksum by design)
-          if (trio_is_ihd_text(f)) {
-            std::string t = trio_ihd_text(f);
-            if (!t.empty()) { ESP_LOGI("trio", "IHD: %s", t.c_str()); id(ihd_status).publish_state(t.substr(0, 250)); }
-            if (!f.ok) return;
+          // Zigbee chip debug text (0x8028): show it, and don't count it as damaged (its checksum often fails by design)
+          if (trio_is_chip_text(f)) {
+            std::string t = trio_chip_text(f);
+            if (!t.empty()) {
+              ESP_LOGI("trio", "Zigbee chip: %s", t.c_str());
+              id(zigbee_msg).publish_state(t);
+            }
+            return;
           }
           if (!f.ok) {
             id(g_bad_count) += 1;
@@ -136,6 +189,32 @@ uart:
               id(bad_frame_last).publish_state(std::string(hdr) + trio_hex(bytes, 100));
             }
             return;
+          }
+
+          // Zigbee link quality: the byte after the destination address (profile+12) in each meter data frame.
+          // It moves in steps of 3 (seen 22-52) and x3 matches the chip's beacon LQI (~115-118), so it is
+          // published x3 on the usual 0-255 LQI scale. Same radio link for elec and gas (gas comes via the
+          // comms hub). Averaged over 60 s by the sensor's filter. (Header capture 14 Nov 2026.)
+          if (f.msg_type == 0x8002 && f.profile_pos != 0 && size_t(f.profile_pos) + 12 < f.unescaped.size())
+            id(zigbee_link_quality).publish_state(f.unescaped[f.profile_pos + 12] * 3);
+
+          // Frame mismatch monitoring ("Frame mismatch count" / "Last frame mismatch"), one counter for all three checks.
+          // Profile and ZCL use fixed positions (byte 9, profile+19); a mismatch = the fallback scan had to be used.
+          // Price: field-layout position vs the GBP search disagree (decoder still uses the search).
+          static int mismatch_n = 0;
+          auto report_mismatch = [&](const std::string &what, const std::string &hex) {
+            mismatch_n++;
+            id(frame_mismatch_count).publish_state(mismatch_n);
+            id(frame_mismatch_last).publish_state("#" + std::to_string(mismatch_n) + " " + what + ": " + hex);
+            if (mismatch_n <= 20) ESP_LOGW("trio", "Frame mismatch: %s: %s", what.c_str(), hex.c_str());
+          };
+          if (f.profile_pos != 0 && f.profile_pos != 9) {
+            char w[48]; snprintf(w, sizeof w, "profile at byte %u (type %04X)", (unsigned) f.profile_pos, f.msg_type);
+            report_mismatch(w, trio_hex(f.unescaped, 40));
+          }
+          if (f.profile_pos != 0 && f.zcl_off != 19) {
+            char w[48]; snprintf(w, sizeof w, "ZCL at +%d (profile byte %u)", (int) f.zcl_off, (unsigned) f.profile_pos);
+            report_mismatch(w, trio_hex(f.unescaped, 48));
           }
 
           // ---- 1. "New kind of message?" -> HA ------------------------------------
@@ -151,12 +230,26 @@ uart:
             }
             for (auto &s : sigs) {
               if (TRIO_KNOWN.count(s) || reported.count(s)) continue;
-              if (reported.size() < 50) reported.insert(s);
+              if (reported.size() >= 200) continue;   // safety cap: stop reporting rather than repeat on every frame
+              reported.insert(s);
               id(g_new_count) += 1;
               std::string hex = trio_hex(f.unescaped, 110);
               ESP_LOGW("trio", "NEW message kind %s: %s", s.c_str(), hex.c_str());
               id(new_msg_count).publish_state(id(g_new_count));
               id(new_msg_last).publish_state(s + " " + hex);
+            }
+            // Diagnostic: while "Capture message examples" is on, log the first frame of each kind in full
+            if (id(capture_examples).state) {
+              static std::set<std::string> captured;
+              static int gen = -1;
+              if (gen != id(g_capture_gen)) { captured.clear(); gen = id(g_capture_gen); }   // fresh list each switch-on
+              std::string fresh;
+              for (auto &s : sigs)
+                if (captured.size() < 300 && captured.insert(s).second) fresh += (fresh.empty() ? "" : " ") + s;
+              if (!fresh.empty()) {
+                ESP_LOGI("trio", "CAPTURE kinds: %s", fresh.c_str());
+                ESP_LOGI("trio", "CAPTURE hex: %s", trio_hex(f.unescaped, 200).c_str());
+              }
             }
           }
 
@@ -164,16 +257,92 @@ uart:
           if (f.zcl && f.cluster == 0x0700 && f.cluster_specific) {
             double v; bool changed = false;
             bool elec = f.endpoint == 1, gas = f.endpoint == 2;
-            if ((v = trio_publish_price(f)) > 0 && v < 5) {
-              if (elec) { id(g_elec_rate) = v; changed = true; }
-              if (gas)  { id(g_gas_rate) = v;  changed = true; }
+            // Monitoring: does the field-layout position agree with the GBP search? (if so, switch to it later)
+            if (f.cmd == 0x00 || f.cmd == 0x04) {
+              int ps = trio_currency_pos_search(f), pf = trio_currency_pos_fixed(f);
+              if (ps != pf) {
+                char w[64]; snprintf(w, sizeof w, "price ep%u cmd %02X search %d layout %d", f.endpoint, f.cmd, ps, pf);
+                report_mismatch(w, trio_hex(f.payload, 60));
+              }
             }
-            if ((v = trio_standing_charge(f)) >= 0 && v < 10) {
-              if (elec) { id(g_elec_standing) = v; changed = true; }
-              if (gas)  { id(g_gas_standing) = v;  changed = true; }
+            // Billing period (Publish Billing Period, cmd 0x09) -> e.g. "01 Nov – 01 Dec 2026"
+            {
+              uint32_t bstart, bdur; uint8_t btype;
+              if (trio_billing_period(f, bstart, bdur, btype)) {
+                time_t now_t = ::time(nullptr);
+                time_t s = bstart ? time_t(bstart) + 946684800 : now_t;   // ZCL time counts from 2000
+                // The meter sends the start of the FIRST period of a repeating schedule (e.g. 26 Mar):
+                // step forward one period at a time until the period covers today (like the Trio does).
+                auto add_period = [&](struct tm t) {
+                  switch (btype & 0x0F) {
+                    case 0: t.tm_min += bdur; break;
+                    case 1: t.tm_mday += bdur; break;
+                    case 2: t.tm_mday += 7 * bdur; break;
+                    case 3: t.tm_mon += bdur; break;
+                    case 4: t.tm_year += bdur; break;
+                  }
+                  t.tm_isdst = -1;
+                  mktime(&t);
+                  return t;
+                };
+                struct tm a, b; localtime_r(&s, &a); b = add_period(a);
+                for (int n = 0; n < 600 && bdur > 0 && now_t > 1700000000 && mktime(&b) <= now_t; n++) { a = b; b = add_period(a); }
+                char t1[16], t2[24];
+                strftime(t1, sizeof t1, "%d %b", &a);
+                strftime(t2, sizeof t2, "%d %b %Y", &b);
+                std::string txt = std::string(t1) + " – " + t2;
+                ESP_LOGI("trio", "Billing period (ep%u): %s  [start %u, duration %u, type 0x%02X] payload %s",
+                         f.endpoint, txt.c_str(), (unsigned) bstart, (unsigned) bdur, btype, trio_hex(f.payload, 40).c_str());
+                if (id(billing_period).state != txt) id(billing_period).publish_state(txt);
+              }
             }
-            if (gas && (v = trio_conversion_factor(f)) > 0.5 && v < 2) { id(g_gas_cf) = v; changed = true; }
-            if (gas && (v = trio_calorific_value(f)) > 20 && v < 60)  { id(g_gas_cv) = v; changed = true; }
+            // Future-tariff guard: a meter can hold a pending tariff (e.g. at a supplier or tariff change) or an
+            // empty slot (start 0xFFFFFFFF). Only apply a tariff command once its start time has passed (0 = now);
+            // log a future one once, so the new prices show up in the log in advance.
+            bool skip = false;
+            {
+              uint32_t st = trio_price_start_time(f);
+              auto nowt = id(ha_time).now();
+              if (st == 0xFFFFFFFF) skip = true;
+              else if (st != 0 && nowt.is_valid() && time_t(st) + 946684800 > nowt.timestamp + 60) {
+                skip = true;
+                static std::set<std::string> told;
+                char key[32]; snprintf(key, sizeof key, "%u-%02X-%u", f.endpoint, f.cmd, (unsigned) st);
+                if (told.size() < 50 && told.insert(key).second) {
+                  auto t = ESPTime::from_epoch_local(time_t(st) + 946684800);
+                  char when[24]; t.strftime(when, sizeof when, "%Y-%m-%d %H:%M");
+                  double pv = trio_publish_price(f), sv = trio_standing_charge(f);
+                  double cv = trio_conversion_factor(f), kv = trio_calorific_value(f);
+                  ESP_LOGW("trio", "Future tariff (ep%u cmd %02X) from %s, not applied yet: price %.5f standing %.5f CF %.5f CV %.1f",
+                           f.endpoint, f.cmd, when, pv, sv, cv, kv);
+                }
+              }
+            }
+            if (!skip) {
+              // Price tier (time-of-use: expect it to change at 23:00 / 06:00)
+              {
+                int ntiers = -1, tier = trio_price_tier(f, &ntiers);
+                if (tier >= 0) {
+                  ESP_LOGI("trio", "Publish Price ep%u: tier %d of %d", f.endpoint, tier, ntiers);
+                  if (elec) id(elec_price_tier).publish_state(tier);
+                }
+              }
+              if ((v = trio_publish_price(f)) > 0 && v < 5) {
+                if (elec) { id(g_elec_rate) = v; changed = true; }
+                if (gas)  { id(g_gas_rate) = v;  changed = true; }
+              }
+              // 0 is accepted: standing charges may be abolished (gas planned for 2027). Empty slots are already
+              // skipped above by their 0xFFFFFFFF start time. Warn once when a standing charge becomes 0.
+              if ((v = trio_standing_charge(f)) >= 0 && v < 10) {
+                double old = elec ? id(g_elec_standing) : id(g_gas_standing);
+                if (v == 0 && old != 0 && (elec || gas))
+                  ESP_LOGW("trio", "%s standing charge from meter is now 0 (was %.5f)", elec ? "Electricity" : "Gas", old);
+                if (elec) { id(g_elec_standing) = v; changed = true; }
+                if (gas)  { id(g_gas_standing) = v;  changed = true; }
+              }
+              if (gas && (v = trio_conversion_factor(f)) > 0.5 && v < 2) { id(g_gas_cf) = v; changed = true; }
+              if (gas && (v = trio_calorific_value(f)) > 20 && v < 60)  { id(g_gas_cv) = v; changed = true; }
+            }
             if (changed) {
               id(g_tariff_from_meter) = true;
               auto now = id(ha_time).now();
@@ -183,18 +352,189 @@ uart:
             }
           }
 
+          // ---- 2b. Supplier messages (Messaging cluster) -----------------------------
+          {
+            std::string text; uint32_t start = 0;
+            if (trio_display_message(f, text, start)) {
+              char when[24] = "now";
+              if (start != 0) {
+                auto t = ESPTime::from_epoch_local(start + 946684800UL);   // ZCL time counts from 2000-01-01
+                t.strftime(when, sizeof when, "%Y-%m-%d %H:%M");
+              }
+              ESP_LOGI("trio", "Supplier message (ep%u, from %s): \"%s\"  payload %s",
+                       f.endpoint, when, text.c_str(), trio_hex(f.payload, 80).c_str());
+              if (!text.empty() && text != id(g_supplier_msg)) {
+                id(g_supplier_msg) = text;
+                global_preferences->sync();   // rare: save it now
+              }
+              if (!text.empty() && id(supplier_msg).state != text) id(supplier_msg).publish_state(text);
+            } else if (trio_cancel_message(f)) {
+              ESP_LOGI("trio", "Supplier message cancelled (ep%u cmd %02X)", f.endpoint, f.cmd);
+              id(g_supplier_msg) = "(cancelled)";
+              id(supplier_msg).publish_state("(cancelled)");
+            }
+          }
+          // Supplier name (Device Management 0x0708 attr 0x0101 ProviderName), e.g. "Your Supplier".
+          // Both meters send it at Trio start-up; it should change at a change of supplier.
+          {
+            std::string name;
+            if (trio_string_attr(f, 0x0708, 0x0101, name) && !name.empty() && name != id(supplier_name).state) {
+              ESP_LOGI("trio", "Supplier (ep%u): \"%s\"", f.endpoint, name.c_str());
+              id(supplier_name).publish_state(name);
+              if (name != id(g_supplier_name)) { id(g_supplier_name) = name; global_preferences->sync(); }   // rare: save now
+            }
+          }
+
+          // ---- 2c. Gas power: the meter's gas use in the last half hour -------------
+          // Get Sampled Data Response (gas Metering cmd 0x07). The Trio asks for it at boot, about a minute
+          // after every half hour and with the hourly tariff burst; its "30 minute average" is this sample.
+          // Payload: sample id (2), start time UTC (4), type (1, 0 = consumption), interval in s (2), count (2),
+          // then 24-bit samples in 0.001 m³. The Trio asks for more than one interval (13 Nov: 0.000 and 0.060 m³
+          // 9 s apart; at start-up even the previous night's), so only the newest COMPLETE half hour that
+          // ended within the last hour is used; others are logged and ignored.
+          if (f.zcl && f.endpoint == 3 && f.cluster == 0x0702 && f.cluster_specific && f.cmd == 0x07) {
+            const auto &p = f.payload;
+            uint16_t secs = p.size() >= 14 ? (p[7] | (p[8] << 8)) : 0;
+            uint16_t n = p.size() >= 14 ? (p[9] | (p[10] << 8)) : 0;
+            size_t o = 11 + 3 * size_t(n ? n - 1 : 0);   // samples run from the start time: the last is the latest
+            if (secs > 0 && n > 0 && p[6] == 0x00 && o + 3 <= p.size()) {   // secs > 0 implies >= 14 bytes
+              uint32_t s = p[o] | (p[o + 1] << 8) | (uint32_t(p[o + 2]) << 16);
+              if (s != 0xFFFFFF) {
+                static uint32_t newest = 0;   // start of the newest complete half hour used (ZCL time)
+                uint32_t start = p[2] | (p[3] << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
+                uint32_t st = start + uint32_t(n - 1) * secs;            // start of the sample used
+                time_t a = time_t(st) + 946684800, b = a + secs;        // ZCL time counts from 2000
+                auto ta = ESPTime::from_epoch_local(a), tb = ESPTime::from_epoch_local(b);
+                auto now = id(ha_time).now();   // before the first time sync: accept (no time checks)
+                char span[24];
+                if (now.is_valid() && ta.day_of_year != now.day_of_year)   // not today: show the date too
+                  ta.strftime(span, sizeof span, "%d %b %H:%M");
+                else
+                  ta.strftime(span, sizeof span, "%H:%M");
+                snprintf(span + strlen(span), sizeof span - strlen(span), "-%02d:%02d", tb.hour, tb.minute);
+                double w = s / 1000.0 * id(g_gas_cf) * id(g_gas_cv) / 3.6 * 3600.0 / secs * 1000.0;
+                if (now.is_valid() && b > now.timestamp) {
+                  ESP_LOGD("trio", "Gas half hour %s: %.3f m3 - not finished yet, ignored", span, s / 1000.0);
+                } else if (now.is_valid() && now.timestamp - b > 3600) {
+                  // the Trio also asks for old intervals at start-up (e.g. 02:00 the previous night)
+                  ESP_LOGD("trio", "Gas half hour %s: %.3f m3 - too old, ignored", span, s / 1000.0);
+                } else if (st < newest) {
+                  ESP_LOGD("trio", "Gas half hour %s: %.3f m3 - older than the latest, ignored", span, s / 1000.0);
+                } else {
+                  newest = st;
+                  ESP_LOGD("trio", "Gas half hour %s: %.3f m3 -> %.0f W", span, s / 1000.0, w);
+                  id(gas_power).publish_state(w);
+                  id(g_gas_sample_ms) = millis();
+                  id(g_gas_sample_end) = st + secs;   // "Gas data stale" checks how old this is
+                }
+              }
+            }
+          }
+
           // ---- 3. Readings --------------------------------------------------------
+          // clock values for the running cost totals (0 / -1 if HA time isn't set yet)
+          int day_now = 0, day_soon = 0, mins_now = -1;
+          {
+            auto now = id(ha_time).now();
+            if (now.is_valid()) {
+              day_now = now.year * 1000 + now.day_of_year;
+              auto soon = ESPTime::from_epoch_local(now.timestamp + 900);
+              day_soon = soon.year * 1000 + soon.day_of_year;
+              mins_now = now.hour * 60 + now.minute;
+            }
+          }
+          // Bill to date = raw (0x0A00) / 10^digits (0x0A04 high nibble); checked against the Trio's Balance
+          // screens 13 Nov. Published (and logged) only when it moves by 1p: the raw value changes every ~10 s.
+          auto bill_publish = [&](bool gas) {
+            static double last_e = -1, last_g = -1;   // last value published
+            double raw = gas ? id(g_g_bill_raw) : id(g_e_bill_raw);
+            int dg = gas ? id(g_g_bill_digits) : id(g_e_bill_digits);
+            if (raw < 0 || dg < 0) return;
+            double v = raw / std::pow(10.0, dg);
+            double &last = gas ? last_g : last_e;
+            if (v >= 0 && v < 100000 && (last < 0 || std::fabs(v - last) >= 0.01 || v < last)) {
+              ESP_LOGD("trio", "%s bill to date: raw %.0f, %d decimals -> %.2f", gas ? "Gas" : "Electricity", raw, dg, v);
+              (gas ? id(gas_bill) : id(elec_bill))->publish_state(v);
+              last = v;
+            }
+          };
+          // Meter scaling (diagnostic, display only; the decoder keeps its fixed /1000 and /100000).
+          // Metering 0x0300 unit, 0x0301 multiplier, 0x0302 divisor, 0x0303 summation format, 0x0306 device type;
+          // Prepayment 0x0500 cost format, 0x0501 cost unit, 0x0502 currency scaling. ep1 = elec, ep3 = gas.
+          // Only sent in the Trio's start-up burst, so the text is saved to flash (g_meter_scaling) and shown at boot.
+          // Values seen on a SMETS2 install (all match the decoder): elec unit 0 (kWh), gas unit 1 (m3), x1 /1000,
+          // currency scaling 0x01 (= 0.00001). A different unit/multiplier/divisor/scaling logs a warning and
+          // starts the text with "CHECK SCALING" (e.g. after a meter exchange); the decoder is NOT changed.
+          {
+            static int64_t sc[2][8] = {{-1, -1, -1, -1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1, -1, -1, -1}};
+            bool changed = false;
+            for (auto &a : f.attrs) {
+              int e = a.endpoint == 1 ? 0 : a.endpoint == 3 ? 1 : -1, k = -1;
+              if (e < 0) continue;
+              if (a.cluster == 0x0702 && a.attr >= 0x0300 && a.attr <= 0x0303) k = a.attr - 0x0300;
+              else if (a.cluster == 0x0702 && a.attr == 0x0306) k = 4;
+              else if (a.cluster == 0x0705 && a.attr >= 0x0500 && a.attr <= 0x0502) k = 5 + (a.attr - 0x0500);
+              if (k < 0 || sc[e][k] == a.raw) continue;
+              sc[e][k] = a.raw; changed = true;
+              ESP_LOGI("trio", "Meter scaling ep%u %04X/%04X = %lld (0x%llX)", a.endpoint, a.cluster, a.attr,
+                       (long long) a.raw, (unsigned long long) a.raw);
+            }
+            if (changed) {
+              // expected values: unit (elec 0 kWh, gas 1 m3), multiplier 1, divisor 1000, currency scaling 0x01
+              bool bad = false;
+              for (int e = 0; e < 2; e++) {
+                const int64_t want[8] = {e ? 1 : 0, 1, 1000, -1, -1, -1, -1, 1};   // -1 = not checked
+                const char *what[8] = {"unit", "multiplier", "divisor", "", "", "", "", "currency scaling"};
+                for (int k = 0; k < 8; k++)
+                  if (want[k] >= 0 && sc[e][k] >= 0 && sc[e][k] != want[k]) {
+                    bad = true;
+                    ESP_LOGW("trio", "Meter scaling: %s %s is %lld, decoder assumes %lld - readings/costs may be wrong",
+                             e ? "gas" : "elec", what[k], (long long) sc[e][k], (long long) want[k]);
+                  }
+              }
+              auto v = [&](int e, int k, bool hex) -> std::string {
+                if (sc[e][k] < 0) return "?";
+                char t[24]; snprintf(t, sizeof t, hex ? "0x%02llX" : "%lld", (long long) sc[e][k]); return t;
+              };
+              std::string s = bad ? "CHECK SCALING - " : "";
+              for (int e = 0; e < 2; e++) {
+                s += e ? " | Gas: " : "Elec: ";
+                s += "unit " + v(e, 0, false) + " x" + v(e, 1, false) + " /" + v(e, 2, false) +
+                     " fmt " + v(e, 3, true) + " type " + v(e, 4, true) +
+                     "; cost fmt " + v(e, 5, true) + " unit " + v(e, 6, false) + " scale " + v(e, 7, true);
+              }
+              // While the burst is still filling in values, keep showing the saved text (unless a check failed),
+              // so HA history doesn't get a row of "?" versions at every Trio restart
+              bool partial = s.find('?') != std::string::npos;
+              if (s != id(g_meter_scaling) && (!partial || bad || id(g_meter_scaling).empty())) {
+                id(meter_scaling).publish_state(s);
+                if (!partial) id(g_meter_scaling) = s;   // saved to flash at the next preferences write
+              }
+            }
+          }
           for (auto &a : f.attrs) {
             double r = double(a.raw);
             if (a.endpoint == 1 && a.cluster == 0x0702) {
               switch (a.attr) {
                 case 0x0400: if (r > -20000 && r < 30000) { id(elec_power).publish_state(r); id(g_last_reading_ms) = millis(); } break;
                 case 0x0000: {
-                  double kwh = r / 1000.0;
-                  double last = id(g_last_elec_kwh);
-                  if (last == 0 || (kwh >= last && kwh - last < 10)) { id(g_last_elec_kwh) = kwh; id(elec_meter).publish_state(kwh); }
-                  else if (kwh < last && last - kwh < 0.05) ESP_LOGD("trio", "Ignored stale electricity reading %.3f (last %.3f)", kwh, last);
+                  static TrioMeterFilter flt;
+                  double kwh = r / 1000.0, last = flt.last;
+                  TrioCheck c = trio_meter_check(flt, kwh, 10, 0.05, 1);
+                  if (c == TRIO_ACCEPT_AFTER_GAP) ESP_LOGW("trio", "Electricity reading %.3f accepted after 3 consistent readings (last %.3f)", kwh, last);
+                  if (c == TRIO_ACCEPT || c == TRIO_ACCEPT_AFTER_GAP) id(elec_meter).publish_state(kwh);
+                  else if (c == TRIO_STALE) ESP_LOGD("trio", "Ignored stale electricity reading %.3f (last %.3f)", kwh, last);
                   else ESP_LOGW("trio", "Rejected electricity reading %.3f (last %.3f)", kwh, last);
+                  break;
+                }
+                case 0x0001: {   // CurrentSummationReceived = total exported to the grid
+                  static TrioMeterFilter flt;
+                  double kwh = r / 1000.0, last = flt.last;
+                  TrioCheck c = trio_meter_check(flt, kwh, 10, 0.05, 1);
+                  if (c == TRIO_ACCEPT_AFTER_GAP) ESP_LOGW("trio", "Export reading %.3f accepted after 3 consistent readings (last %.3f)", kwh, last);
+                  if (c == TRIO_ACCEPT || c == TRIO_ACCEPT_AFTER_GAP) id(elec_export_meter).publish_state(kwh);
+                  else if (c == TRIO_STALE) ESP_LOGD("trio", "Ignored stale export reading %.3f (last %.3f)", kwh, last);
+                  else ESP_LOGW("trio", "Rejected export reading %.3f (last %.3f)", kwh, last);
                   break;
                 }
                 case 0x0401: {
@@ -206,15 +546,37 @@ uart:
                   break;
                 }
                 case 0x0403: id(elec_yesterday).publish_state(r / 1000.0); break;
+                // Supply status (enum8): 0 = off, 1 = off/armed, 2 = on
+                case 0x0014: {
+                  int v = int(a.raw);
+                  if (v != 2) ESP_LOGW("trio", "Electricity supply status %d (0 off, 1 armed, 2 on)", v);
+                  id(elec_supply).publish_state(v == 2);
+                  break;
+                }
+                // Meter status flags (bitmap8)
+                case 0x0200: {
+                  std::string s = trio_meter_status_text(uint8_t(a.raw), false);
+                  if (id(elec_meter_status).state != s) {
+                    if (s != "OK") ESP_LOGW("trio", "Electricity meter status: %s", s.c_str());
+                    id(elec_meter_status).publish_state(s);
+                  }
+                  break;
+                }
                 case 0x0440: id(elec_month).publish_state(r / 1000.0); break;
+                case 0x0430: id(elec_week).publish_state(r / 1000.0); break;     // this week (from Monday)
+                // Bill to date (0x0A00) and its trailing digits (0x0A04, high nibble = decimal places)
+                case 0x0A00: id(g_e_bill_raw) = r; bill_publish(false); break;
+                case 0x0A04: id(g_e_bill_digits) = (int(a.raw) >> 4) & 0x0F; bill_publish(false); break;
               }
             } else if (a.endpoint == 1 && a.cluster == 0x0705) {
               switch (a.attr) {
                 case 0x051C: {
                   double cost = r / 100000.0;
-                  if (id(g_prev_e_cost) > 0.5 && cost < id(g_prev_e_cost) - 0.1) id(elec_cost_yesterday).publish_state(id(g_prev_e_cost));
-                  id(g_prev_e_cost) = cost;
                   id(elec_cost_today).publish_state(cost);
+                  double y = trio_cost_total(cost, id(g_elec_standing), id(g_e_cost_prev), id(g_e_cost_total), id(g_e_reset_day),
+                                             day_now, day_soon, mins_now);
+                  if (y >= 0) id(elec_cost_yesterday).publish_state(y);   // previous day's final cost, any amount
+                  id(elec_cost_total).publish_state(id(g_e_cost_total));
                   // unit rate = change in cost / change in kWh, same day
                   double kwh = id(g_e_today_kwh);
                   if (kwh >= 0) {
@@ -226,32 +588,50 @@ uart:
                       id(g_e_anchor_kwh) = kwh; id(g_e_anchor_cost) = cost;
                     }
                   }
+                  // average unit rate today = (cost today - standing charge) / kWh today; shows time-of-use shifting.
+                  // Blank until 0.5 kWh used, and across midnight while cost and kWh reset at different moments.
+                  {
+                    double avg = (kwh >= 0.5) ? (cost - id(g_elec_standing)) / kwh : NAN;
+                    if (!(avg > 0 && avg < 2)) avg = NAN;
+                    if (!std::isnan(avg) || !std::isnan(id(elec_avg_rate_today).state))
+                      id(elec_avg_rate_today).publish_state(avg);
+                  }
                   break;
                 }
                 case 0x051E: id(elec_cost_yesterday).publish_state(r / 100000.0); break;
                 case 0x0540: id(elec_cost_month).publish_state(r / 100000.0); break;
+                case 0x0530: id(elec_cost_week).publish_state(r / 100000.0); break;
               }
             } else if (a.endpoint == 3 && a.cluster == 0x0702) {
               switch (a.attr) {
                 case 0x0000: {
-                  double m3 = r / 1000.0;
-                  double last = id(g_last_gas_m3);
-                  if (last == 0 || (m3 >= last && m3 - last < 5)) {
-                    id(g_last_gas_m3) = m3;
+                  static TrioMeterFilter flt;
+                  // after a reboot, start from the saved m3 so a slightly old first frame counts as stale
+                  if (flt.last == 0 && id(g_gas_kwh_base_m3) > 0) flt.last = id(g_gas_kwh_base_m3);
+                  double m3 = r / 1000.0, last = flt.last;
+                  TrioCheck c = trio_meter_check(flt, m3, 5, 0.05, 0.5);
+                  if (c == TRIO_ACCEPT_AFTER_GAP) ESP_LOGW("trio", "Gas reading %.3f accepted after 3 consistent readings (last %.3f)", m3, last);
+                  if (c == TRIO_ACCEPT || c == TRIO_ACCEPT_AFTER_GAP) {
                     id(gas_meter_m3).publish_state(m3);
-                    double f = id(g_gas_cf) * id(g_gas_cv) / 3.6;
+                    double kf = id(g_gas_cf) * id(g_gas_cv) / 3.6;
                     double base = id(g_gas_kwh_base_m3);
-                    if (base <= 0 || id(g_gas_kwh_total) <= 0 || m3 < base || m3 - base > 50) {
-                      // first ever reading (or meter swapped): start the running total from the meter itself
-                      id(g_gas_kwh_total) = m3 * f;
+                    if (base <= 0 || id(g_gas_kwh_total) <= 0) {
+                      // first ever reading: start the running total from the meter itself
+                      id(g_gas_kwh_total) = m3 * kf;
                       id(g_gas_kwh_base_m3) = m3;
-                      ESP_LOGI("trio", "Gas kWh total initialised at %.3f (%.3f m3 x %.4f)", id(g_gas_kwh_total), m3, f);
-                    } else if (m3 > base) {
-                      id(g_gas_kwh_total) += (m3 - base) * f;
+                      ESP_LOGI("trio", "Gas kWh total initialised at %.3f (%.3f m3 x %.4f)", id(g_gas_kwh_total), m3, kf);
+                    } else if (m3 >= base) {
+                      // any size of rise is real use (e.g. after a long gap), so the total never resets
+                      id(g_gas_kwh_total) += (m3 - base) * kf;
+                      id(g_gas_kwh_base_m3) = m3;
+                    } else if (base - m3 > 1) {
+                      // meter reading went well backwards (meter replaced?): keep the total, count on from here
+                      ESP_LOGW("trio", "Gas meter went from %.3f to %.3f m3; kWh total kept, counting on from the new reading", base, m3);
                       id(g_gas_kwh_base_m3) = m3;
                     }
+                    // else: just below the saved base (stale frame): total unchanged
                     id(gas_meter_kwh).publish_state(id(g_gas_kwh_total));
-                  } else if (m3 < last && last - m3 < 0.05) ESP_LOGD("trio", "Ignored stale gas reading %.3f (last %.3f)", m3, last);
+                  } else if (c == TRIO_STALE) ESP_LOGD("trio", "Ignored stale gas reading %.3f (last %.3f)", m3, last);
                   else ESP_LOGW("trio", "Rejected gas reading %.3f (last %.3f)", m3, last);
                   break;
                 }
@@ -262,16 +642,41 @@ uart:
                   id(g_g_today_kwh) = v; id(gas_today).publish_state(v);
                   break;
                 }
-                case 0x0C03: id(gas_yesterday).publish_state(r / 1000.0); break;
+                case 0x0C03:
+                  // 0 just after midnight = the meter's gas day hasn't rolled over yet (~00:35-01:00).
+                  // A real 0 kWh day still gets through: the meter repeats this value through the day.
+                  if (r == 0 && mins_now >= 0 && mins_now < 90) { ESP_LOGD("trio", "Gas yesterday 0 before rollover, ignored"); break; }
+                  id(gas_yesterday).publish_state(r / 1000.0);
+                  break;
                 case 0x0C40: id(gas_month).publish_state(r / 1000.0); break;
+                case 0x0C30: id(gas_week).publish_state(r / 1000.0); break;   // this week (from Monday)
+                case 0x0A00: id(g_g_bill_raw) = r; bill_publish(true); break;
+                case 0x0A04: id(g_g_bill_digits) = (int(a.raw) >> 4) & 0x0F; bill_publish(true); break;
+                // Supply status = gas valve (enum8): 0 = closed, 1 = closed/armed, 2 = open
+                case 0x0014: {
+                  int v = int(a.raw);
+                  if (v != 2) ESP_LOGW("trio", "Gas supply status %d (0 off, 1 armed, 2 on)", v);
+                  id(gas_supply).publish_state(v == 2);
+                  break;
+                }
+                case 0x0200: {
+                  std::string s = trio_meter_status_text(uint8_t(a.raw), true);
+                  if (id(gas_meter_status).state != s) {
+                    if (s != "OK") ESP_LOGW("trio", "Gas meter status: %s", s.c_str());
+                    id(gas_meter_status).publish_state(s);
+                  }
+                  break;
+                }
               }
             } else if (a.endpoint == 3 && a.cluster == 0x0705) {
               switch (a.attr) {
                 case 0x051C: {
                   double cost = r / 100000.0;
-                  if (id(g_prev_g_cost) > 0.3 && cost < id(g_prev_g_cost) - 0.1) id(gas_cost_yesterday).publish_state(id(g_prev_g_cost));
-                  id(g_prev_g_cost) = cost;
                   id(gas_cost_today).publish_state(cost);
+                  double y = trio_cost_total(cost, id(g_gas_standing), id(g_g_cost_prev), id(g_g_cost_total), id(g_g_reset_day),
+                                             day_now, day_soon, mins_now);
+                  if (y >= 0) id(gas_cost_yesterday).publish_state(y);   // previous day's final cost, any amount
+                  id(gas_cost_total).publish_state(id(g_g_cost_total));
                   double kwh = id(g_g_today_kwh);
                   if (kwh >= 0) {
                     if (id(g_g_anchor_kwh) < 0 || kwh < id(g_g_anchor_kwh) || cost < id(g_g_anchor_cost)) {
@@ -284,13 +689,37 @@ uart:
                   }
                   break;
                 }
-                case 0x051E: id(gas_cost_yesterday).publish_state(r / 100000.0); break;
+                case 0x051E:
+                  // Just after midnight the meter can still report 0 for "yesterday" until its gas day rolls
+                  // over (~00:35-01:00); a real gas cost is never 0 (standing charge), so skip it.
+                  if (r == 0 && mins_now >= 0 && mins_now < 90) { ESP_LOGD("trio", "Gas cost yesterday 0 before rollover, ignored"); break; }
+                  id(gas_cost_yesterday).publish_state(r / 100000.0);
+                  break;
                 case 0x0540: id(gas_cost_month).publish_state(r / 100000.0); break;
+                case 0x0530: id(gas_cost_week).publish_state(r / 100000.0); break;
               }
             }
           }
 
 script:
+  # Runs on the first clock sync from either source (HA or SNTP); only acts once per boot.
+  - id: restore_yesterday
+    then:
+      - lambda: |-
+          // Restore yesterday's figures only if they were saved today (i.e. they really are yesterday's)
+          static bool done = false;
+          if (done) return;
+          auto now = id(ha_time).now();
+          if (!now.is_valid()) return;
+          done = true;
+          int today = now.year * 1000 + now.day_of_year;
+          if (id(g_y_day) != today) { ESP_LOGI("trio", "Stored yesterday values are stale, not restoring"); return; }
+          if (id(g_y_e_kwh)  >= 0 && std::isnan(id(elec_yesterday).state))      id(elec_yesterday).publish_state(id(g_y_e_kwh));
+          if (id(g_y_e_cost) >= 0 && std::isnan(id(elec_cost_yesterday).state)) id(elec_cost_yesterday).publish_state(id(g_y_e_cost));
+          if (id(g_y_g_kwh)  >= 0 && std::isnan(id(gas_yesterday).state))       id(gas_yesterday).publish_state(id(g_y_g_kwh));
+          if (id(g_y_g_cost) >= 0 && std::isnan(id(gas_cost_yesterday).state))  id(gas_cost_yesterday).publish_state(id(g_y_g_cost));
+          ESP_LOGI("trio", "Restored yesterday values from flash");
+
   - id: tariff_settle
     mode: restart        # each new tariff message restarts the timer
     then:
@@ -311,6 +740,7 @@ script:
           id(gas_cf).publish_state(id(g_gas_cf));
           id(gas_cv).publish_state(id(g_gas_cv));
           id(gas_kwh_per_m3).publish_state(id(g_gas_cf) * id(g_gas_cv) / 3.6);
+          id(gas_rate_m3).publish_state(id(g_gas_rate) * id(g_gas_cf) * id(g_gas_cv) / 3.6);
           // one place decides the source, so it never flickers
           float calc = id(elec_rate_calc).state;
           bool differs = !std::isnan(calc) && std::fabs(calc - id(g_elec_rate)) > 0.005;
@@ -328,13 +758,35 @@ interval:
   - interval: 5min
     then:
       - script.execute: publish_tariff
+  # Gas power: unknown if no half-hour sample has arrived for 65 min (the Trio normally asks every 30 min)
+  - interval: 1min
+    then:
+      - lambda: |-
+          if (!std::isnan(id(gas_power).state) && millis() - id(g_gas_sample_ms) > 65UL * 60 * 1000)
+            id(gas_power).publish_state(NAN);
+
+# ---------------------------------------------------------------------------------------
+switch:
+  # Diagnostic: while on, log the full hex of the first frame of each message kind (starts a fresh list each time).
+  # Keeps its state through restarts: the tap is powered by the Trio, so it restarts with it, and the Trio's
+  # start-up burst is what we want to capture.
+  - platform: template
+    id: capture_examples
+    name: "Capture message examples"
+    icon: mdi:record-rec
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(g_capture_gen) += 1;
 
 # ---------------------------------------------------------------------------------------
 sensor:
   # Electricity
-  - { platform: template, id: elec_power, name: "Electricity power", unit_of_measurement: W, device_class: power, state_class: measurement, accuracy_decimals: 0, filters: [ { throttle_average: 30s } ] }
-  - { platform: template, id: elec_meter, name: "Electricity meter", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3 }
-  - { platform: template, id: elec_today, name: "Electricity today", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ { delta: 0.01 } ] }
+  - { platform: template, id: elec_power, name: "Electricity power", unit_of_measurement: W, device_class: power, state_class: measurement, accuracy_decimals: 0 }
+  - { platform: template, id: elec_meter, name: "Electricity meter", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_export_meter, name: "Electricity export meter", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_today, name: "Electricity today", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
   - platform: template
     id: elec_yesterday
     name: "Electricity yesterday"
@@ -346,10 +798,9 @@ sensor:
         - lambda: |-
             id(g_y_e_kwh) = x;
             auto now = id(ha_time).now();
-            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;
-            global_preferences->sync();
-  - { platform: template, id: elec_month, name: "Electricity this month", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ { delta: 0.01 } ] }
-  - { platform: template, id: elec_cost_today, name: "Electricity cost today", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ { delta: 0.01 } ] }
+            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;   // saved in the 5-min flash batch
+  - { platform: template, id: elec_month, name: "Electricity this month", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_cost_today, name: "Electricity cost today", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
   - platform: template
     id: elec_cost_yesterday
     name: "Electricity cost yesterday"
@@ -361,14 +812,19 @@ sensor:
         - lambda: |-
             id(g_y_e_cost) = x;
             auto now = id(ha_time).now();
-            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;
-            global_preferences->sync();
-  - { platform: template, id: elec_cost_month, name: "Electricity cost this month", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ { delta: 0.01 } ] }
+            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;   // saved in the 5-min flash batch
+  - { platform: template, id: elec_cost_month, name: "Electricity cost this month", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_week, name: "Electricity this week", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_cost_week, name: "Electricity cost this week", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
+  - { platform: template, id: elec_bill, name: "Electricity bill to date", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, icon: "mdi:receipt-text", filters: [ delta: 0.01 ] }
+  # For the Energy dashboard ("Use an entity tracking the total costs"): usage + standing charges, never decreases
+  - { platform: template, id: elec_cost_total, name: "Electricity cost (running total)", unit_of_measurement: GBP, device_class: monetary, state_class: total, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
   # Gas
   - { platform: template, id: gas_meter_m3, name: "Gas meter", unit_of_measurement: "m³", device_class: gas, state_class: total_increasing, accuracy_decimals: 3 }
   # Running total: each new m³ is converted at the CF/CV in force when it was used, so a CV change never rewrites history.
-  - { platform: template, id: gas_meter_kwh, name: "Gas meter (kWh)", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 2 }
-  - { platform: template, id: gas_today, name: "Gas today", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ { delta: 0.01 } ] }
+  - { platform: template, id: gas_meter_kwh, name: "Gas meter (kWh)", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_power, name: "Gas power", unit_of_measurement: W, device_class: power, state_class: measurement, accuracy_decimals: 0 }
+  - { platform: template, id: gas_today, name: "Gas today", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
   - platform: template
     id: gas_yesterday
     name: "Gas yesterday"
@@ -380,10 +836,9 @@ sensor:
         - lambda: |-
             id(g_y_g_kwh) = x;
             auto now = id(ha_time).now();
-            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;
-            global_preferences->sync();
-  - { platform: template, id: gas_month, name: "Gas this month", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ { delta: 0.01 } ] }
-  - { platform: template, id: gas_cost_today, name: "Gas cost today", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ { delta: 0.01 } ] }
+            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;   // saved in the 5-min flash batch
+  - { platform: template, id: gas_month, name: "Gas this month", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_cost_today, name: "Gas cost today", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
   - platform: template
     id: gas_cost_yesterday
     name: "Gas cost yesterday"
@@ -395,15 +850,20 @@ sensor:
         - lambda: |-
             id(g_y_g_cost) = x;
             auto now = id(ha_time).now();
-            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;
-            global_preferences->sync();
-  - { platform: template, id: gas_cost_month, name: "Gas cost this month", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ { delta: 0.01 } ] }
+            if (now.is_valid()) id(g_y_day) = now.year * 1000 + now.day_of_year;   // saved in the 5-min flash batch
+  - { platform: template, id: gas_cost_month, name: "Gas cost this month", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_week, name: "Gas this week", unit_of_measurement: kWh, device_class: energy, state_class: total_increasing, accuracy_decimals: 3, filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_cost_week, name: "Gas cost this week", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_bill, name: "Gas bill to date", unit_of_measurement: GBP, device_class: monetary, accuracy_decimals: 2, icon: "mdi:receipt-text", filters: [ delta: 0.01 ] }
+  - { platform: template, id: gas_cost_total, name: "Gas cost (running total)", unit_of_measurement: GBP, device_class: monetary, state_class: total, accuracy_decimals: 2, filters: [ delta: 0.01 ] }
   # Tariff
   - { platform: template, id: elec_rate, name: "Electricity unit rate", unit_of_measurement: "GBP/kWh", accuracy_decimals: 5, icon: "mdi:currency-gbp" }
   - { platform: template, id: elec_standing, name: "Electricity standing charge", unit_of_measurement: "GBP/d", accuracy_decimals: 5, icon: "mdi:currency-gbp" }
   - { platform: template, id: gas_rate, name: "Gas unit rate", unit_of_measurement: "GBP/kWh", accuracy_decimals: 5, icon: "mdi:currency-gbp" }
   - { platform: template, id: gas_standing, name: "Gas standing charge", unit_of_measurement: "GBP/d", accuracy_decimals: 5, icon: "mdi:currency-gbp" }
+  - { platform: template, id: gas_rate_m3, name: "Gas unit rate per m³", unit_of_measurement: "GBP/m³", accuracy_decimals: 5, icon: "mdi:currency-gbp" }
   - { platform: template, id: elec_rate_calc, name: "Electricity unit rate (calculated)", unit_of_measurement: "GBP/kWh", accuracy_decimals: 4, icon: "mdi:calculator", entity_category: diagnostic }
+  - { platform: template, id: elec_avg_rate_today, name: "Electricity average unit rate today", unit_of_measurement: "GBP/kWh", accuracy_decimals: 4, icon: "mdi:calculator", entity_category: diagnostic, filters: [ delta: 0.0005 ] }
   - { platform: template, id: gas_rate_calc, name: "Gas unit rate (calculated)", unit_of_measurement: "GBP/kWh", accuracy_decimals: 4, icon: "mdi:calculator", entity_category: diagnostic }
   - { platform: template, id: gas_cf, name: "Gas volume correction factor", unit_of_measurement: "×", accuracy_decimals: 5, entity_category: diagnostic }
   - { platform: template, id: gas_cv, name: "Gas calorific value", unit_of_measurement: "MJ/m³", accuracy_decimals: 1, entity_category: diagnostic }
@@ -411,33 +871,76 @@ sensor:
   # Health
   - { platform: template, id: new_msg_count, name: "New message kinds seen", state_class: measurement, accuracy_decimals: 0, icon: "mdi:radar", entity_category: diagnostic }
   - { platform: template, id: bad_frames, name: "Damaged frames rejected", state_class: measurement, accuracy_decimals: 0, icon: "mdi:alert-circle-outline", entity_category: diagnostic }
+  # Monitoring: frames whose 0x0109 profile isn't at byte 9 (expected 0; counts since boot)
+  - { platform: template, id: frame_mismatch_count, name: "Frame mismatch count", state_class: measurement, accuracy_decimals: 0, icon: "mdi:magnify", entity_category: diagnostic }
+  # Zigbee link quality (LQI 0-255) to the meters' comms hub, from each data frame; 60 s average
+  - platform: template
+    id: zigbee_link_quality
+    name: "Zigbee link quality"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:signal
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 60s
+  - { platform: template, id: elec_price_tier, name: "Electricity price tier", accuracy_decimals: 0, state_class: measurement, icon: "mdi:stairs" }
   - platform: internal_temperature
     name: "Board temperature"
     update_interval: 60s
     entity_category: diagnostic
   - platform: wifi_signal
     name: "WiFi signal"
-    update_interval: 5min
+    update_interval: 60s
     entity_category: diagnostic
   - platform: uptime
     name: "Uptime"
-    update_interval: 5min
     entity_category: diagnostic
 
 binary_sensor:
+  # Supply status from the meters (0x0702 attr 0x0014): on = supply connected / gas valve open
+  - { platform: template, id: elec_supply, name: "Electricity supply", device_class: power }
+  - { platform: template, id: gas_supply, name: "Gas supply", icon: "mdi:valve" }
   # On if no electricity reading has arrived for 5 minutes (loose wire, IHD crashed or lost the meter)
   - platform: template
-    name: "Meter data stale"
+    id: electricity_data_stale
+    name: "Electricity data stale"
     device_class: problem
     entity_category: diagnostic
     lambda: |-
       uint32_t last = id(g_last_reading_ms);
       if (last == 0) return millis() > 300000;          // nothing at all since boot, 5 min grace
       return (millis() - last) > 300000;
+  # On if the newest gas half-hour sample ended over 65 minutes ago (normally 1-31 min; 65 = two missed in a
+  # row). Uses the half hour's own end time, not its arrival, so a hub re-sending an old half hour (gas meter
+  # gone quiet: flat battery, out of range) still counts as stale. Also covers a loose wire, the IHD crashing
+  # or losing the comms hub. After boot: on if no sample at all within 65 minutes.
+  - platform: template
+    id: gas_data_stale
+    name: "Gas data stale"
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      const uint32_t limit_s = 65 * 60;
+      uint32_t end = id(g_gas_sample_end);
+      auto nowt = id(ha_time).now();
+      if (end == 0 || !nowt.is_valid()) return millis() > limit_s * 1000UL && end == 0;
+      return nowt.timestamp - (time_t(end) + 946684800) > limit_s;
 
 text_sensor:
   - { platform: template, id: tariff_source, name: "Tariff source", icon: "mdi:source-branch", entity_category: diagnostic }
   - { platform: template, id: tariff_last, name: "Tariff last received", icon: "mdi:clock-outline", entity_category: diagnostic }
   - { platform: template, id: new_msg_last, name: "Last new message kind", icon: "mdi:radar", entity_category: diagnostic }
   - { platform: template, id: bad_frame_last, name: "Last damaged frame", icon: "mdi:alert-circle-outline", entity_category: diagnostic }
-  - { platform: template, id: ihd_status, name: "IHD status message", icon: "mdi:message-text-outline", entity_category: diagnostic }
+  - { platform: template, id: frame_mismatch_last, name: "Last frame mismatch", icon: "mdi:magnify", entity_category: diagnostic }
+  # Latest text message from the energy supplier (Messaging cluster 0x0703), e.g. a welcome message
+  - { platform: template, id: supplier_msg, name: "Supplier message", icon: "mdi:message-alert-outline" }
+  # Supplier name from the meters (Device Management ProviderName)
+  - { platform: template, id: supplier_name, name: "Supplier", icon: "mdi:domain" }
+  - { platform: template, id: billing_period, name: "Billing period", icon: "mdi:calendar-range" }
+  # Last plain-text line from the Trio's Zigbee chip (JN5169, msg 0x8028), e.g. "Initiating rejoin as MAC restored"
+  - { platform: template, id: zigbee_msg, name: "Zigbee chip message", icon: "mdi:message-text-outline", entity_category: diagnostic }
+  # Raw scaling attributes from the meters (see "Meter scaling" in section 3); display only
+  - { platform: template, id: meter_scaling, name: "Meter scaling", icon: "mdi:scale-balance", entity_category: diagnostic }
+  # Meter status flags (0x0702 attr 0x0200): "OK" or the flags set, e.g. "Low battery"
+  - { platform: template, id: elec_meter_status, name: "Electricity meter status", icon: "mdi:meter-electric", entity_category: diagnostic }
+  - { platform: template, id: gas_meter_status, name: "Gas meter status", icon: "mdi:meter-gas", entity_category: diagnostic }

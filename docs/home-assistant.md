@@ -29,8 +29,12 @@ Diagnostics:
 | Electricity / gas unit rate (calculated) | cost change ÷ usage change, over 1 kWh, as a cross-check |
 | Damaged frames rejected / Last damaged frame | frames failing the checksum, with their raw bytes. Should stay near zero |
 | New message kinds seen / Last new message kind | anything the meter sends that isn't in the known list, with raw bytes |
-| IHD status message | the Zigbee chip's own text, e.g. `Initiating rejoin as MAC restored` |
-| Meter data stale | on if no reading for 5 minutes (loose wire, IHD crashed, lost the meter) |
+| Zigbee chip message | the Zigbee chip's own text, e.g. `Initiating rejoin as MAC restored` |
+| Electricity data stale | on if no electricity reading for 5 minutes (loose wire, IHD crashed, lost the meter) |
+| Gas data stale | on if the newest gas half-hour sample ended over 65 minutes ago |
+| Frame mismatch count / Last frame mismatch | frames where a fixed position didn't match and the fallback scan was used. Should stay 0 |
+| Zigbee link quality | LQI (0–255) of the link to the meters, from each data frame |
+| Meter scaling | the meters' own unit/multiplier/divisor/currency scaling; starts `CHECK SCALING` if they differ from what the decoder assumes |
 | Board temperature, WiFi signal, Uptime | health |
 
 ## Energy dashboard
@@ -122,14 +126,16 @@ actions:
 alias: Geo Trio - Meter data stale
 triggers:
   - trigger: state
-    entity_id: binary_sensor.geo_trio_tap_meter_data_stale
+    entity_id:
+      - binary_sensor.geo_trio_tap_electricity_data_stale
+      - binary_sensor.geo_trio_tap_gas_data_stale
     to: "on"
     for: "00:05:00"
 actions:
   - action: notify.mobile_app_your_phone
     data:
       title: Smart meter data stopped
-      message: No readings from the Geo Trio tap for 10 minutes.
+      message: "{{ trigger.to_state.name }} - no recent readings from the Geo Trio tap."
 ```
 
 ### Big draw while nobody's home
