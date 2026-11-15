@@ -9,6 +9,8 @@
 //     comms hub 0x0000 ep2 (gas service, 0x0500): Basic, DRLC, Messaging, Price, Time, Calendar, Device Mgmt
 //     comms hub 0x0000 ep3 (gas metering device, 0x0501): Basic, Metering, Prepayment, Events
 //   Calendar is advertised by both, but the Trio's calendar request still gets G0B "unsupported".
+//   Some Trios get the gas meter's Metering/Prepayment on ep2 instead: the tap then lists those as E3
+//   (see "Gas meter endpoint" in geo-trio-tap.yaml), so this list doesn't need an E2 copy.
 //   A<attr> = attribute value, X<cmd> = cluster command, G01 = read-attributes response,
 //   G0B = default response (all seen are status 0x81 "unsupported" replies to Trio requests)
 //   M<type> = non-data message type on the Trio <-> Zigbee chip serial line
@@ -132,6 +134,10 @@ static const std::set<std::string> TRIO_KNOWN = {
   "E2-C0700-A0304",   // CalorificValue
   "E2-C0700-A0305",   // CalorificValueUnit
   "E2-C0700-A0306",   // CalorificValueTrailingDigit
+  "E2-C0700-G0B",     // default response from the hub, first seen 15 Nov 2026 17:36 (the Trio restart after the
+                      // 15 Nov hub outage): 18 54 0B 05 C1 = reply to Price cmd 0x05 Get Calorific Value with
+                      // status 0xC1 SOFTWARE_FAILURE (all earlier G0Bs were 0x81 unsupported). Harmless: the CV
+                      // still arrives in the hub's Publish Calorific Value (X03)
   "E2-C0700-X00",     // Publish Price [used]
   "E2-C0700-X02",     // Publish Conversion Factor [used]
   "E2-C0700-X03",     // Publish Calorific Value [used]
@@ -226,29 +232,20 @@ static const std::set<std::string> TRIO_KNOWN = {
   "E3-C0705-A0558",   // cost previous month 12
   "E3-C0705-A055A",   // cost previous month 13
 
-  // ---- Non-data serial messages (Trio <-> Zigbee chip); not publicly documented ----
-  // A variant of NXP's serial protocol (as used by ZiGate).
-  "M0072",   // start-up handshake: alternates with 800A ~5x in the first second; data 00
-  "M0514",   // unknown (type < 0x8000: probably a Trio -> chip command)
-  "M7FFF",   // request going out (11 bytes) / end of exchange (13 bytes)
-  "M8000",   // Status: Zigbee chip acknowledging a command (IHD start-up); len+5 frame, accepted since 2026-11-10.
-             // Data: status (00 = OK), seq, command acknowledged, extra. Seen 15 Nov 2026: command 0x0010
-             // (ZiGate: get version) + 00 01 8B 8E 01 04 00 2D (probably the chip's firmware version), and 0x060B
-  "M8008",   // send status: seq, status, src/dst endpoint, addr, APS counter
-  "M8009",   // send status, as 8008 plus profile + cluster
-  "M800A",   // start-up handshake reply to 0072 (empty)
-  "M8012",   // unknown
-  "M8014",   // guess: stack out-of-buffers error (always data 05 83, seen during a burst of unanswered sends)
-  "M8023",   // Zigbee device-profile (ZDO, profile 0x0000) reply, laid out like 8002, incl. the LQI byte.
-             // The Trio's network discovery at start-up (confirmed on this Trio 15 Nov 2026):
-             // Node_Desc_rsp (0x8002, hub = coordinator), Match_Desc_rsp (0x8006, matching endpoints),
-             // Simple_Desc_rsp (0x8004, endpoint's device id + cluster lists, see the map at the top)
-  "M8024",   // likely network joined/rejoined: contains the Trio's own short address. Not sent at a normal
-             // Trio restart (it resumes its saved network), so expected only on a join/rejoin
+  // ---- Non-data serial messages (Trio <-> Zigbee chip); NXP serial protocol variant (as ZiGate) ----
+  "M0072",   // start-up handshake (with 800A)
+  "M0514",   // Trio -> chip: rescan / rejoin the network
+  "M7FFF",   // request sent / end of exchange
+  "M8000",   // chip acknowledges a command (start-up; incl. the chip's firmware version)
+  "M8008",   // send status
+  "M8009",   // send status, with profile + cluster
+  "M800A",   // start-up handshake reply
+  "M8012",   // unknown (not seen on this Trio)
+  "M8014",   // probably a stack status during busy sending (guess)
+  "M8023",   // network discovery replies at start-up (node / match / simple descriptors)
+  "M8024",   // join result: 12 bytes = joined (own address, channel, PAN ID); 08 CA = failed, no network
   "M8028",   // Zigbee chip debug text [used: Zigbee chip message]
-  "M802A",   // send failed, no ACK: data E9 = MAC_NO_ACK (the following 8008 repeats status E9).
-             // A few during the start-up burst is normal (4 seen 15 Nov 2026, no data lost)
-  "M8071",   // unknown: data 00 00 11 / 00 00 09, seen between discovery replies and 8024 (join/security step?);
-             // not sent at a normal Trio restart
-  "M8073",   // unknown: empty payload, rare (gaza)
+  "M802A",   // send failed, no ACK (a few at start-up is normal)
+  "M8071",   // stack event naming a neighbour (meter or hub) + code; harmless, meaning unknown
+  "M8073",   // rejoin / scan attempt (every 1-2 s while the network is missing)
 };

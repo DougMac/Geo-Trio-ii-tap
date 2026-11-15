@@ -392,8 +392,8 @@ views:
             entities:
               - type: section
                 label: Meters
-              - { entity: binary_sensor.geo_trio_tap_electricity_data_stale, name: Electricity data }
-              - { entity: binary_sensor.geo_trio_tap_gas_data_stale, name: Gas data }
+              - { entity: binary_sensor.geo_trio_tap_electricity_data_stale, name: Electricity readings }
+              - { entity: binary_sensor.geo_trio_tap_gas_data_stale, name: Gas readings }
               - { entity: sensor.geo_trio_tap_electricity_meter, name: Electricity meter, secondary_info: last-changed }
               - { entity: sensor.geo_trio_tap_electricity_export_meter, name: Export meter, secondary_info: last-changed, icon: mdi:transmission-tower-export }
               - { entity: sensor.geo_trio_tap_gas_meter_kwh, name: Gas meter (kWh), secondary_info: last-changed }

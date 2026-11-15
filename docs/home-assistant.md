@@ -34,7 +34,7 @@ Diagnostics:
 | Gas data stale | on if the newest gas half-hour sample ended over 65 minutes ago |
 | Frame mismatch count / Last frame mismatch | frames where a fixed position didn't match and the fallback scan was used. Should stay 0 |
 | Zigbee link quality | LQI (0–255) of the link to the meters, from each data frame |
-| Meter scaling | the meters' own unit/multiplier/divisor/currency scaling; starts `CHECK SCALING` if they differ from what the decoder assumes |
+| Meter scaling | the scaling in use and where it came from, e.g. `Elec: kWh /1000, cost /100000 (meter) \| Gas: m³ /1000, cost /100000 (meter)`; starts `CHECK SCALING` if a meter's values were rejected and the defaults are used |
 | Board temperature, WiFi signal, Uptime | health |
 
 ## Energy dashboard
