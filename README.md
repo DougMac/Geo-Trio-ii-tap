@@ -228,4 +228,3 @@ python3 tools/decode_log.py samples/startup-burst.txt --summary
 - The Zigbee Smart Energy specification (ZCL clusters 0x0700, 0x0702, 0x0705). The serial framing resembles NXP's JN516x host protocol as used by ZiGate; I worked the details (escape, checksum, length) out from captures, so trust the description here over other sources.
 
 MIT licence, see [LICENSE](LICENSE).
-"# Geo-Trio-ii-tap" 
