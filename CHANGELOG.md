@@ -17,7 +17,8 @@ Changes in this fork compared with the original firmware. Every change was check
 - **Electricity export meter** (0x0702/0x0001).
 - **Gas power**: the meter's own half-hour gas sample (Get Sampled Data Response, Metering cmd 0x07), the same "30 minute average" the Trio shows.
 - **This week** usage and cost (elec and gas), **bill to date** (0x0A00/0x0A04), **billing period** (Price cmd 0x09).
-- **Running cost totals** (`state_class: total`, standing charges included) for the Energy dashboard's "entity tracking the total costs", and **cost yesterday** from the meter's daily reset.
+- **Running cost totals**: `Electricity cost (running total)` and `Gas cost (running total)` (`state_class: total`, never decrease). They add up the meter's own daily costs, **standing charges included**, so the Energy dashboard's costs match the bill instead of pricing usage only. To use them, in Settings → Dashboards → Energy, edit the electricity grid consumption and the gas source, choose **"Use an entity tracking the total costs"** and pick the matching running total.
+- **Cost yesterday** from the meter's daily reset.
 - **Electricity average unit rate today**, **calculated unit rates** (from the meter's cost and kWh), **electricity price tier** (for time-of-use tariffs).
 - **Supply status** (elec/gas binary sensors), **meter status** flags, **supplier name** (Device Management ProviderName), **supplier message** (Messaging Display Message).
 - **Zigbee link quality** (LQI from each data frame).
