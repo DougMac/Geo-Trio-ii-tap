@@ -2,6 +2,8 @@
 
 [`trio-dashboard.yaml`](trio-dashboard.yaml) is a Home Assistant dashboard for the tap's sensors. It has a Trio-style electricity dial and gas flame, cost tiles, today/daily/monthly charts and entity lists for electricity, gas, tariff and status.
 
+![Example dashboard](dashboard.png)
+
 ## Requirements
 
 - **Custom cards** (install from HA's Marketplace / HACS): [button-card](https://github.com/custom-cards/button-card) and [apexcharts-card](https://github.com/RomRider/apexcharts-card).
