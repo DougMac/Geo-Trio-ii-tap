@@ -198,7 +198,7 @@ Full notes in [docs/home-assistant.md](docs/home-assistant.md). The essentials:
 
 - **Energy dashboard, electricity**: `Electricity meter` (kWh), price from the `Electricity unit rate` sensor, and `Electricity power` for the live view.
 - **Energy dashboard, gas**: use **`Gas meter (kWh)`**, the running total, priced with `Gas unit rate`. Don't use a "m³ × current CV" sensor: when the calorific value changes, the whole lifetime total jumps, and Home Assistant reads the drop as a meter reset and double-counts your history.
-- **Costs**: the Energy dashboard prices usage only. The C3's "cost today" sensors include standing charges and match the bill. Both are right; they answer different questions.
+- **Costs**: the Energy dashboard prices usage only. The C3's "cost today" sensors include standing charges and match the bill. Both are right; they answer different questions. *(In this fork: to include standing charges in the Energy dashboard too, choose "Use an entity tracking the total costs" and pick `Electricity cost (running total)` / `Gas cost (running total)`. See [CHANGELOG.md](CHANGELOG.md).)*
 - **Cost sensors are plain values**, not running totals. They reset daily and monthly, and Home Assistant would read each reset as a refund.
 
 ![Diagnostics](images/ha-diagnostics.png)
